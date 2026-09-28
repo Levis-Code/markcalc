@@ -65,6 +65,32 @@ out = E.processContent(L(
   '<!-- calc: $M = money($X) -->'), { precision: 6 }, {});
 ok('formato money(1500) -> $1,500.00', has(out, /\$1,500\.00/));
 
+ok('displayWidth: Han Ext, emoji ZWJ, ancho completo y acentos',
+  eq(E.renderTable({
+    header: ['𪚥', '👨‍👩‍👧‍👦', 'Ａ', 'e\u0301'],
+    align: ['-', '-', '-', '-'],
+    rows: [['1', '2', '3', '4']],
+  }), [
+    '| 𪚥  | 👨‍👩‍👧‍👦  | Ａ  | é   |',
+    '| --- | --- | --- | --- |',
+    '| 1   | 2   | 3   | 4   |',
+  ]));
+
+out = E.processContent(L(
+  '| 品(甲) | 😀 | 😁 | 总 计 |', '| - | - | - | - |', '| 苹果 | 2 | 3 |  |',
+  '<!-- calc: ${总 计} = ${😀} + ${😁} -->'
+), { precision: 6 }, {});
+ok('unicode: cálculo con emojis (no colisionan) y nombres complejos',
+  has(out, /\| 苹果\s*\|\s*2\s*\|\s*3\s*\|\s*5\s*\|/));
+
+out = E.processContent(L(
+  '| 汉 | 数量 | 结果 |', '| - | - | - |', '| 0 | 2 |  |',
+  '<!-- calc: $汉 = 1 ; ${结果} = "$数量" -->'
+), { precision: 6 }, {});
+ok('unicode: variable no-ASCII exige ${...} y respeta strings literal',
+  eq(E.parseTable(out.split('\n'), 0).rows[0], ['0', '2', '$数量']));
+
+
 // ===================== MISMA NOTA (entre tablas) =====================
 out = E.processContent(L(
   '| Prod | Precio |', '| - | -: |', '| Cafe | 3 |', '| Te | 2 |',

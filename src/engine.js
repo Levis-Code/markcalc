@@ -223,8 +223,8 @@ function isTableStart(lines, i) {
 
 // nombre de columna -> identificador seguro (insensible a mayúsculas).
 function sanitize(name) {
-  let s = String(name).trim().toLowerCase().replace(/[^a-z0-9_]/g, '_');
-  if (/^[0-9]/.test(s)) s = '_' + s;
+  const s = String(name).trim().toLowerCase().replace(/[^a-z0-9_]/gu,
+    (character) => '$' + character.codePointAt(0).toString(16).padStart(6, '0') + '$');
   return '__c_' + s;
 }
 
@@ -350,6 +350,75 @@ function parseTable(lines, start) {
   return { header, align, rows, startIdx: start, endIdx: idx - 1 };
 }
 
+const WIDE = new RegExp(
+  String.raw`[
+    /* Fullwidth spaces, CJK punctuation, CJK radicals and strokes */
+    \u{2e80}-\u{2ef3}\u{2f00}-\u{2fd5}\u{2ff0}-\u{2fff}\u{3000}-\u{303f}
+
+    /* Japanese hiragana, katakana, bopomofo, and Korean compatibility letters */
+    \u{3040}-\u{30ff}\u{3100}-\u{312f}\u{3130}-\u{318f}\u{3190}-\u{31ef}
+
+    /* Enclosed CJK characters, CJK compatibility square units, and CJK Extension A */
+    \u{3200}-\u{32ff}\u{3300}-\u{33ff}\u{3400}-\u{4dbf}\u{4e00}-\u{9fff}
+
+    /* Korean syllables, CJK compatibility ideographs */
+    \u{ac00}-\u{d7af}\u{f900}-\u{faff}
+
+    /* Vertical punctuation forms and CJK compatibility punctuation forms */
+    \u{fe10}-\u{fe1f}\u{fe30}-\u{fe4f}\u{fe50}-\u{fe6f}
+
+    /* Fullwidth ASCII, fullwidth letters/digits, fullwidth symbols, and fullwidth currency */
+    \u{ff01}-\u{ff60}\u{ffe0}-\u{ffe6}
+
+    /* CJK Unified Ideographs Extensions B-G and other supplementary ideographs */
+    \u{20000}-\u{2fffd}\u{30000}-\u{3fffd}
+  ]`
+    .replace(/\/\*[\s\S]*?\*\//g, '') // Strip comments
+    .replace(/\s+/g, ''),              // Strip whitespace and newlines
+  'u'
+);
+const HALFWIDTH = /[\uff61-\uffdc\uffe8-\uffed]/u;
+const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+function isEmojiGrapheme(segment) {
+  // Keycap sequence (e.g. U+20E3 after digit / # / *): emoji grapheme, width 2
+  if (/^[0-9#*]\ufe0f?\u20e3$/u.test(segment)) return true;
+  let pictographCount = 0;
+  let regionalCount = 0;
+  for (const character of segment) {
+    // \p{Extended_Pictographic}: pictographic emoji (incl. default text-style ones); for counting
+    if (/\p{Extended_Pictographic}/u.test(character)) pictographCount++;
+    // \p{Regional_Indicator}: flag regional indicator (e.g. two regional indicator letters)
+    if (/\p{Regional_Indicator}/u.test(character)) regionalCount++;
+  }
+  return regionalCount >= 2 ||
+    (pictographCount >= 2 && segment.includes('\u200d')) ||
+    // \p{Emoji_Presentation} or variation selector \uFE0F: rendered as emoji
+    (pictographCount > 0 && (/\p{Emoji_Presentation}/u.test(segment) || segment.includes('\ufe0f')));
+}
+
+function graphemeWidth(segment) {
+  // Control and zero-width/invisible chars (ZWJ, variation selectors, combining marks) do not affect display width
+  const visible = [...segment].filter((character) => !/\p{Control}/u.test(character) && !/[\p{Default_Ignorable_Code_Point}\p{Format}\p{Mark}]/u.test(character));
+  if (visible.length === 0) return 0;
+  if (isEmojiGrapheme(segment)) return 2;
+  let width = 0;
+  for (const character of visible) {
+    if (WIDE.test(character)) width += 2;
+    else if (HALFWIDTH.test(character)) width += 1;
+  }
+  if (width === 0) width = 1; // Latin and other narrow visible characters.
+  return width;
+}
+
+function displayWidth(text) {
+  if (!text) return 0;
+  if (/^[\x20-\x7e]*$/.test(text)) return text.length;
+  let width = 0;
+  for (const { segment } of GRAPHEME_SEGMENTER.segment(text)) width += graphemeWidth(segment);
+  return width;
+}
+
 function renderTable(table) {
   const ncol = table.header.length;
   const norm = (arr) => {
@@ -368,9 +437,9 @@ function renderTable(table) {
     if (left) return 'l';
     return '';
   });
-  const widths = header.map((h, i) => Math.max(3, h.length, ...rows.map((r) => r[i].length)));
+  const widths = header.map((h, i) => Math.max(3, displayWidth(h), ...rows.map((r) => displayWidth(r[i]))));
   const pad = (s, w, al) => {
-    const total = w - s.length;
+    const total = w - displayWidth(s);
     if (total <= 0) return s;
     if (al === 'r') return ' '.repeat(total) + s;
     if (al === 'c') { const l = Math.floor(total / 2); return ' '.repeat(l) + s + ' '.repeat(total - l); }
@@ -409,7 +478,11 @@ function parseFormula(f) {
   if (m) return { kind: 'cell', colName: m[1].trim(), rowN: +m[2], expr: m[3].trim() };
   m = f.match(/^([A-Za-z_][\w]*)\s*\(\s*(\d+)\s*\)\s*=\s*([\s\S]+)$/);
   if (m) return { kind: 'cell', colName: m[1].trim(), rowN: +m[2], expr: m[3].trim() };
-  m = f.match(/^\$\{?([^=}()]+)\}?\s*=\s*([\s\S]+)$/);
+  m = f.match(/^\$\{([^}]+)\}\s*=\s*([\s\S]+)$/);
+  if (m) return { kind: 'col', colName: m[1].trim(), expr: m[2].trim() };
+  m = f.match(/^\$([A-Za-z_][\w]*)\s*=\s*([\s\S]+)$/);
+  if (m) return { kind: 'col', colName: m[1].trim(), expr: m[2].trim() };
+  m = f.match(/^([A-Za-z_][\w]*)\s*=\s*([\s\S]+)$/);
   if (m) return { kind: 'col', colName: m[1].trim(), expr: m[2].trim() };
   return null;
 }
